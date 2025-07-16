@@ -1,0 +1,148 @@
+# =========================
+# 1. DEPLOYMENT
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindbox
+  labels:
+    app: mindbox
+spec:
+  replicas: 2         # начальное количество подов: достаточно для отказоустойчивости и экономии ресурсов ночью
+  selector:
+    matchLabels:
+      app: mindbox
+  template:
+    metadata:
+      labels:
+        app: mindbox
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway  # пожддержка мультизонадьности, но в случае недоступности все поды будут размещены даже в одной зоне
+          labelSelector:
+            matchLabels:
+              app: mindbox
+      containers:
+        - name: app
+          image: my-registry/mindbox:latest
+          ports:
+            - containerPort: 8080
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 10    # до 20 секунд (10*2)
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "0.1"      # соответствует обычному состоянию приложения
+              memory: "128Mi"
+            limits:
+              cpu: "1"        # покрывает инициализацию (5-10 секунд)
+              memory: "256Mi"
+
+# =========================
+# 2. HPA
+# =========================
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mindbox-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mindbox
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 300
+
+# =========================
+# 3. PDB
+# =========================
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mindbox-pdb
+spec:
+  minAvailable: 2 # гарантируем минимум 2 пода даже во время обновлений/эвакуации нод
+  selector:
+    matchLabels:
+      app: mindbox
+
+# =========================
+# 4. SERVICE
+# =========================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mindbox-service
+spec:
+  selector:
+    app: mindbox
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+# =========================
+# 5. INGRESS
+# =========================
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mindbox-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx  # нужен Ingress Controller
+  rules:
+    - host: mindbox.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mindbox-service
+                port:
+                  number: 80
